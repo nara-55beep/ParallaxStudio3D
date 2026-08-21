@@ -10,7 +10,7 @@ from .scene import load_scene
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="parallax3d",
-        description="Render a single image as a unified-camera 2.5D scene.",
+        description="AI-cut one image into an independently moving 2.5D scene.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     render = sub.add_parser("render", help="Render only MP4 and GIF from a scene")
@@ -19,11 +19,11 @@ def _parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect", help="Extract and save scene layers only")
     inspect.add_argument("scene", type=Path)
     inspect.add_argument("--output", type=Path, default=Path("output/inspection"))
-    auto = sub.add_parser("auto", help="Create a free local draft scene from one image")
+    auto = sub.add_parser("auto", help="AI-cut one image into an editable layer scene")
     auto.add_argument("image", type=Path)
     auto.add_argument("--project", type=Path, default=Path("output/auto_project"))
-    auto.add_argument("--layers", type=int, default=4)
-    image = sub.add_parser("image", help="Analyze and render one image to MP4 + GIF")
+    auto.add_argument("--layers", type=int, default=12)
+    image = sub.add_parser("image", help="AI-cut and render one image to MP4 + GIF")
     image.add_argument("source", type=Path)
     image.add_argument("--output", type=Path, default=Path("output/render"))
     sub.add_parser("app", help="Open the desktop interface")
@@ -51,7 +51,12 @@ def main(argv: list[str] | None = None) -> int:
             if done == 1 or done == total or done % max(1, total // 10) == 0:
                 print(f"Rendering {done}/{total}")
 
-        result = render_image(args.source, args.output, report)
+        result = render_image(
+            args.source,
+            args.output,
+            report,
+            lambda message: print(message, flush=True),
+        )
         print(f"MP4: {result.video}")
         print(f"GIF: {result.gif}")
         return 0

@@ -104,11 +104,13 @@ class DepthCameraRenderer:
         # avoids a hard horizon seam while retaining stronger movement aloft.
         sky_weight = np.clip((0.62 - self.y_norm) / 0.62, 0.0, 1.0)
         sky_weight = sky_weight * sky_weight * (3.0 - 2.0 * sky_weight)
+        background_sky_strength = 0.28 if self.scene.mode == "planes" else 1.0
         map_x += (
             self.scene.camera.sky_drift
             * self.width
             * state.sky
             * sky_weight
+            * background_sky_strength
         )
         return cv2.remap(
             self.source if self.scene.mode == "dense" else self.background,
@@ -121,22 +123,44 @@ class DepthCameraRenderer:
     def _warp_plane(
         self, plane: np.ndarray, region: RegionSpec, state: CameraState
     ) -> np.ndarray:
-        scale = scale_for_depth(
-            region.depth, self.scene.camera.push, state.progress
-        )
+        strength = max(0.0, region.motion_strength)
+        if region.motion == "sky":
+            scale = 1.0 + self.scene.camera.push * state.progress * 0.08
+            shift_x = (
+                self.scene.camera.sky_drift
+                * self.width
+                * state.sky
+                * strength
+            )
+            shift_y = 0.0
+        else:
+            scale = scale_for_depth(
+                region.depth,
+                self.scene.camera.push * strength,
+                state.progress,
+            )
+            response = (0.12 + 0.88 * region.depth) * strength
+            shift_x = (
+                self.scene.camera.truck
+                * self.width
+                * state.truck
+                * response
+            )
+            shift_y = (
+                self.scene.camera.rise
+                * self.height
+                * state.progress
+                * response
+            )
+            if region.motion == "sway":
+                shift_x += (
+                    self.scene.camera.sky_drift
+                    * self.width
+                    * state.sky
+                    * 0.16
+                    * strength
+                )
         focus_x, focus_y = self.focus
-        shift_x = (
-            self.scene.camera.truck
-            * self.width
-            * state.truck
-            * (0.12 + 0.88 * region.depth)
-        )
-        shift_y = (
-            self.scene.camera.rise
-            * self.height
-            * state.progress
-            * (0.12 + 0.88 * region.depth)
-        )
         matrix = np.array(
             [[scale, 0.0, (1.0 - scale) * focus_x - shift_x],
              [0.0, scale, (1.0 - scale) * focus_y - shift_y]],
@@ -254,8 +278,12 @@ class DepthCameraRenderer:
             "layers": [
                 {
                     "name": region.name,
+                    "label": region.label,
                     "file": f"{index:02d}_{region.name}.png",
                     "depth": region.depth,
+                    "motion": region.motion,
+                    "motion_strength": region.motion_strength,
+                    "score": region.score,
                 }
                 for index, (region, _) in enumerate(
                     sorted(self.planes, key=lambda item: item[0].depth), start=2

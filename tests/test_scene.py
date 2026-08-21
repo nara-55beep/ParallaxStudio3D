@@ -8,9 +8,24 @@ import cv2
 from parallax3d.analyzer import create_auto_project
 from parallax3d.renderer import DepthCameraRenderer, render_scene
 from parallax3d.scene import load_scene
+from parallax3d.segmentation import DetectedLayer
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _fake_detector(image, maximum_layers, status_callback):
+    height, width = image.shape[:2]
+    back = np.zeros((height, width), dtype=np.uint8)
+    back[: height // 2] = 255
+    front = np.zeros((height, width), dtype=np.uint8)
+    cv2.circle(front, (width // 2, height // 2), min(height, width) // 4, 255, -1)
+    return [
+        DetectedLayer("sky_01", "sky", 0.98, 0.035, "sky", 1.35, False, back),
+        DetectedLayer(
+            "object_02", "object", 0.95, 0.8, "camera", 1.0, True, front
+        ),
+    ]
 
 
 def test_demo_scene_loads() -> None:
@@ -47,7 +62,14 @@ def test_one_image_render_outputs_only_video_and_gif(tmp_path: Path) -> None:
     cv2.circle(source, (160, 95), 42, (40, 55, 70), -1)
     input_path = tmp_path / "input.png"
     cv2.imwrite(str(input_path), source)
-    scene = load_scene(create_auto_project(input_path, tmp_path / "project"))
+    scene = load_scene(
+        create_auto_project(
+            input_path,
+            tmp_path / "project",
+            layer_detector=_fake_detector,
+            background_builder=lambda image, layers, callback: image.copy(),
+        )
+    )
     scene = replace(
         scene,
         render=replace(

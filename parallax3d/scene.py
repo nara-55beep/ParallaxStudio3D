@@ -23,6 +23,11 @@ class RegionSpec:
     name: str
     depth: float
     rect: tuple[float, float, float, float]
+    label: str = "object"
+    mask: Path | None = None
+    motion: str = "camera"
+    motion_strength: float = 1.0
+    score: float = 1.0
     foreground_points: tuple[tuple[float, float], ...] = ()
     background_points: tuple[tuple[float, float], ...] = ()
     clip_polygon: tuple[tuple[float, float], ...] = ()
@@ -72,6 +77,11 @@ def load_scene(path: str | Path) -> SceneSpec:
             name=item["name"],
             depth=float(item["depth"]),
             rect=tuple(float(v) for v in item["rect"]),
+            label=str(item.get("label", item["name"])),
+            mask=optional_asset(item.get("mask")),
+            motion=str(item.get("motion", "camera")),
+            motion_strength=float(item.get("motion_strength", 1.0)),
+            score=float(item.get("score", 1.0)),
             foreground_points=_pairs(item.get("foreground_points")),
             background_points=_pairs(item.get("background_points")),
             clip_polygon=_pairs(item.get("clip_polygon")),
@@ -115,6 +125,13 @@ def read_depth(path: Path, size: tuple[int, int]) -> np.ndarray:
         raise FileNotFoundError(f"Could not read depth map: {path}")
     depth = cv2.resize(depth, size, interpolation=cv2.INTER_CUBIC)
     return cv2.bilateralFilter(depth, 9, 28, 28).astype(np.float32) / 255.0
+
+
+def read_mask(path: Path, size: tuple[int, int]) -> np.ndarray:
+    mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise FileNotFoundError(f"Could not read layer mask: {path}")
+    return cv2.resize(mask, size, interpolation=cv2.INTER_LINEAR)
 
 
 def _pixel(point: tuple[float, float], width: int, height: int) -> tuple[int, int]:
@@ -173,7 +190,11 @@ def build_planes(scene: SceneSpec) -> tuple[np.ndarray, np.ndarray, list[tuple[R
     )
     planes: list[tuple[RegionSpec, np.ndarray]] = []
     for region in scene.regions:
-        alpha = extract_mask(source, region)
+        alpha = (
+            read_mask(region.mask, size)
+            if region.mask is not None
+            else extract_mask(source, region)
+        )
         rgba = cv2.cvtColor(source, cv2.COLOR_BGR2BGRA)
         rgba[:, :, 3] = alpha
         planes.append((region, rgba))

@@ -1,39 +1,61 @@
 # Architecture
 
-## Pipeline
+## Automatic pipeline
 
-1. Estimate a smooth dense depth field and a stable focal point.
-2. Keep the complete image connected; automatic mode does not create binary
-   person cutouts.
-3. Project every pixel through one dolly/truck camera path.
-4. Add separately phased sky drift with a soft horizon transition.
-5. Add depth-aware particles and velocity-driven radial blur.
-6. Export only MP4 and GIF during normal use.
+1. OneFormer performs panoptic scene parsing and supplies semantic labels for
+   broad scene regions.
+2. SAM 2 runs in segment-everything mode and proposes detailed masks for both
+   known and unlabeled objects.
+3. The selector removes nested duplicate masks, balances compact objects with
+   scenic regions, estimates depth from semantic priors and image position, and
+   assigns camera, sky or vegetation motion.
+4. Compact masks are closed, expanded by one pixel and softly feathered. Their
+   union is dilated and reconstructed by the local LaMa model to create a
+   background plate.
+5. The renderer composites far-to-near transparent planes over the background.
+   Sky uses a faster phase, vegetation adds subtle secondary drift, and camera
+   response grows with depth.
+6. Temporary analysis assets are deleted after normal use. Only MP4 and GIF are
+   exported.
 
-## Why this looks different from sticker animation
+## Why two segmentation models
 
-All camera motion is derived from a shared envelope and focal point. Near pixels
-have a larger projection scale and truck response than far pixels. Sky drift is
-layered on top with a smooth spatial weight, preventing a hard horizon seam.
-The move returns to its first frame for a clean GIF loop.
+Semantic-only models can understand sky or terrain but may merge stylized
+figures into one class. Prompt-free mask generators draw cleaner object
+boundaries but do not know whether a region is sky, a person or a bush. The
+combined result provides scene meaning and fine cutouts without requiring the
+image to contain a fixed set of objects.
 
-## Production AI backends
+## Scene format
 
-The core deliberately has no paid dependency. A production backend can replace
-the draft analyzer with:
+Each generated region records:
 
-- semantic instance segmentation for meaningful object groups;
-- monocular depth prediction for dense geometry;
-- edge-aware alpha matting for hair and fine boundaries;
-- generative inpainting for large hidden areas.
+- a portable grayscale alpha-mask path;
+- its semantic label and confidence score;
+- normalized depth;
+- motion kind (`camera`, `sky`, or `sway`);
+- a motion-strength multiplier.
 
-Those backends should emit the same scene JSON and PNG layers. The renderer and
-editor adapters do not need to change.
+Legacy hand-authored regions without mask files continue to use constrained
+GrabCut points. This keeps the existing After Effects and Blender interchange
+format compatible.
+
+## Motion and compositing
+
+All planes share a looping dolly/truck envelope, preserving a coherent camera.
+Depth changes the scale and translation response. Sky planes use twice the
+camera's horizontal phase frequency. Plant planes add a restrained portion of
+that secondary phase.
+
+The generated background uses local inpainting only for compact foreground
+objects. Broad sky and terrain planes retain the original scene underneath,
+which provides stable coverage during their smaller movement and avoids trying
+to invent an entire landscape band.
 
 ## Host integration
 
-The generated manifest is the compatibility boundary:
+The diagnostic manifest is the compatibility boundary:
 
-- native script adapters reconstruct editable layers where a host SDK exists;
-- a rendered MP4 works in editors without a supported extension API;
-- PNG layers allow manual or third-party compositor integration.
+- native script adapters reconstruct editable planes where a host SDK exists;
+- PNG alpha layers can be adjusted manually in any compositor;
+- MP4 and GIF work without host-specific extensions.
