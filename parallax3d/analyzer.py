@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 
 import cv2
 import numpy as np
@@ -26,58 +27,52 @@ def _spectral_saliency(image: np.ndarray) -> np.ndarray:
     )
 
 
-def _regions_from_saliency(image: np.ndarray, maximum: int = 4) -> tuple[list[dict], np.ndarray]:
-    height, width = image.shape[:2]
-    saliency = _spectral_saliency(image)
-    threshold = int(np.percentile(saliency, 78))
-    binary = np.where(saliency >= threshold, 255, 0).astype(np.uint8)
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (max(5, width // 100), max(5, height // 100))
-    )
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
-    candidates: list[tuple[int, int]] = []
-    min_area = width * height * 0.006
-    max_area = width * height * 0.42
-    for index in range(1, count):
-        area = int(stats[index, cv2.CC_STAT_AREA])
-        if min_area <= area <= max_area:
-            candidates.append((area, index))
-    candidates.sort(reverse=True)
+def estimate_depth(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
+    """Estimate a smooth, cut-free depth surface from composition and saliency.
 
-    regions: list[dict] = []
-    combined = np.zeros((height, width), dtype=np.uint8)
-    for order, (_, index) in enumerate(candidates[:maximum], start=1):
-        component = np.where(labels == index, 255, 0).astype(np.uint8)
-        component = cv2.dilate(component, kernel, iterations=1)
-        x, y, w, h, _ = stats[index]
-        pad_x, pad_y = round(w * 0.08), round(h * 0.08)
-        x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
-        x1, y1 = min(width, x + w + pad_x), min(height, y + h + pad_y)
-        cx, cy = centroids[index]
-        depth = float(np.clip(0.2 + 0.75 * cy / height, 0.2, 0.95))
-        regions.append(
-            {
-                "name": f"subject_{order}",
-                "depth": round(depth, 3),
-                "rect": [
-                    round(x0 / width, 5),
-                    round(y0 / height, 5),
-                    round((x1 - x0) / width, 5),
-                    round((y1 - y0) / height, 5),
-                ],
-                "foreground_points": [[round(cx / width, 5), round(cy / height, 5)]],
-                "background_points": [],
-            }
+    This deliberately avoids binary subject mattes. Every hand, strand, and
+    object edge stays connected to the source image while receiving continuous
+    depth-driven motion.
+    """
+    height, width = image.shape[:2]
+    saliency = _spectral_saliency(image).astype(np.float32) / 255.0
+    saliency = cv2.GaussianBlur(
+        saliency,
+        (0, 0),
+        sigmaX=max(width, height) * 0.035,
+        sigmaY=max(width, height) * 0.035,
+    )
+    if float(saliency.max()) > float(saliency.min()):
+        saliency = cv2.normalize(saliency, None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+    y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
+    perspective = np.interp(
+        y,
+        [0.0, 0.20, 0.42, 0.65, 1.0],
+        [0.03, 0.07, 0.22, 0.53, 0.96],
+    ).astype(np.float32)
+    perspective = np.repeat(perspective, width, axis=1)
+    depth = np.clip(0.70 * perspective + 0.30 * saliency, 0.0, 1.0)
+    depth_u8 = np.round(depth * 255.0).astype(np.uint8)
+    depth_u8 = cv2.bilateralFilter(depth_u8, 15, 32, 32)
+
+    weights = np.maximum(saliency - np.percentile(saliency, 62), 0.0)
+    total = float(weights.sum())
+    if total > 1e-6:
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        focus = (
+            float(np.clip((grid_x * weights).sum() / total / width, 0.30, 0.70)),
+            float(np.clip((grid_y * weights).sum() / total / height, 0.30, 0.62)),
         )
-        combined = cv2.max(combined, component)
-    return regions, combined
+    else:
+        focus = (0.5, 0.45)
+    return depth_u8, focus
 
 
 def create_auto_project(
     image_path: str | Path, output_dir: str | Path, maximum_layers: int = 4
 ) -> Path:
-    """Create a free local draft scene. AI mattes/inpainting can replace its assets."""
+    """Create a portable dense-depth scene without hard subject cutouts."""
     source_path = Path(image_path).resolve()
     output = Path(output_dir).resolve()
     assets = output / "assets"
@@ -88,51 +83,32 @@ def create_auto_project(
     if image is None:
         raise FileNotFoundError(f"Could not read image: {source_path}")
 
-    regions, combined_mask = _regions_from_saliency(image, maximum_layers)
-    if not regions:
-        height, width = image.shape[:2]
-        regions = [{
-            "name": "main_subject",
-            "depth": 0.72,
-            "rect": [0.2, 0.15, 0.6, 0.7],
-            "foreground_points": [[0.5, 0.5]],
-            "background_points": [],
-        }]
-        combined_mask = np.zeros((height, width), dtype=np.uint8)
-        cv2.rectangle(
-            combined_mask,
-            (round(width * 0.2), round(height * 0.15)),
-            (round(width * 0.8), round(height * 0.85)),
-            255,
-            -1,
-        )
-
     source_copy = assets / f"source{source_path.suffix.lower() or '.png'}"
-    source_copy.write_bytes(source_path.read_bytes())
-    inpaint_mask = cv2.dilate(
-        combined_mask,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
-        iterations=2,
-    )
-    clean = cv2.inpaint(image, inpaint_mask, 7, cv2.INPAINT_TELEA)
-    clean_path = assets / "clean_background.png"
-    cv2.imwrite(str(clean_path), clean)
-    cv2.imwrite(str(assets / "subject_proposals.png"), combined_mask)
-    cv2.imwrite(str(assets / "saliency.png"), _spectral_saliency(image))
+    shutil.copy2(source_path, source_copy)
+    depth, focus = estimate_depth(image)
+    depth_path = assets / "depth_map.png"
+    cv2.imwrite(str(depth_path), depth)
 
     data = {
+        "mode": "dense",
         "source": f"../assets/{source_copy.name}",
-        "clean_background": "../assets/clean_background.png",
-        "camera": {"focus": [0.5, 0.45], "push": 0.15},
+        "depth_map": "../assets/depth_map.png",
+        "camera": {
+            "focus": [round(focus[0], 5), round(focus[1], 5)],
+            "push": 0.08,
+            "truck": 0.040,
+            "rise": 0.016,
+            "sky_drift": 0.040
+        },
         "render": {
             "width": 1280,
             "height": 720,
             "fps": 24,
             "duration": 6.0,
-            "particles": 120,
-            "motion_blur": 0.5,
+            "particles": 80,
+            "motion_blur": 0.32,
         },
-        "regions": regions,
+        "regions": [],
     }
     scene_path = scenes / "auto_scene.json"
     scene_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

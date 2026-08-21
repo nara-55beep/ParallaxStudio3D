@@ -7,28 +7,30 @@ from tkinter import filedialog, messagebox, ttk
 
 from .renderer import render_scene
 from .scene import load_scene
+from .workflow import render_image
 
 
 def launch() -> None:
     root = tk.Tk()
     root.title("ParallaxStudio3D")
-    root.geometry("720x390")
-    root.minsize(660, 360)
+    root.geometry("720x360")
+    root.minsize(660, 330)
 
-    default_scene = Path(__file__).resolve().parents[1] / "scenes" / "child_mother.json"
-    scene_value = tk.StringVar(value=str(default_scene))
-    output_value = tk.StringVar(
-        value=str(Path(__file__).resolve().parents[1] / "output" / "demo")
-    )
     image_value = tk.StringVar()
-    status = tk.StringVar(value="Ready — unified depth camera, not sticker drift.")
+    scene_value = tk.StringVar()
+    output_value = tk.StringVar(
+        value=str(Path(__file__).resolve().parents[1] / "output" / "render")
+    )
+    status = tk.StringVar(value="Choose one image, then create MP4 + GIF.")
 
     frame = ttk.Frame(root, padding=20)
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
 
     ttk.Label(frame, text="Single image").grid(row=0, column=0, sticky="w", pady=8)
-    ttk.Entry(frame, textvariable=image_value).grid(row=0, column=1, sticky="ew", padx=8)
+    ttk.Entry(frame, textvariable=image_value).grid(
+        row=0, column=1, sticky="ew", padx=8
+    )
     ttk.Button(
         frame,
         text="Browse",
@@ -40,8 +42,12 @@ def launch() -> None:
         ),
     ).grid(row=0, column=2)
 
-    ttk.Label(frame, text="Scene file").grid(row=1, column=0, sticky="w", pady=8)
-    ttk.Entry(frame, textvariable=scene_value).grid(row=1, column=1, sticky="ew", padx=8)
+    ttk.Label(frame, text="Scene (optional)").grid(
+        row=1, column=0, sticky="w", pady=8
+    )
+    ttk.Entry(frame, textvariable=scene_value).grid(
+        row=1, column=1, sticky="ew", padx=8
+    )
     ttk.Button(
         frame,
         text="Browse",
@@ -51,8 +57,12 @@ def launch() -> None:
         ),
     ).grid(row=1, column=2)
 
-    ttk.Label(frame, text="Output folder").grid(row=2, column=0, sticky="w", pady=8)
-    ttk.Entry(frame, textvariable=output_value).grid(row=2, column=1, sticky="ew", padx=8)
+    ttk.Label(frame, text="Output folder").grid(
+        row=2, column=0, sticky="w", pady=8
+    )
+    ttk.Entry(frame, textvariable=output_value).grid(
+        row=2, column=1, sticky="ew", padx=8
+    )
     ttk.Button(
         frame,
         text="Browse",
@@ -63,22 +73,28 @@ def launch() -> None:
 
     progress = ttk.Progressbar(frame, maximum=100)
     progress.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(22, 8))
-    ttk.Label(frame, textvariable=status).grid(row=4, column=0, columnspan=3, sticky="w")
+    ttk.Label(frame, textvariable=status).grid(
+        row=4, column=0, columnspan=3, sticky="w"
+    )
 
     def update_progress(done: int, total: int) -> None:
         root.after(0, lambda: progress.configure(value=done * 100 / total))
         root.after(0, lambda: status.set(f"Rendering frame {done} of {total}"))
 
-    def worker() -> None:
+    def worker(image_path: str, scene_path: str, output_path: str) -> None:
         try:
-            result = render_scene(
-                load_scene(scene_value.get()), output_value.get(), update_progress
-            )
+            if image_path:
+                result = render_image(image_path, output_path, update_progress)
+            else:
+                result = render_scene(
+                    load_scene(scene_path), output_path, update_progress
+                )
             root.after(0, lambda: status.set(f"Done: {result.video}"))
             root.after(
                 0,
                 lambda: messagebox.showinfo(
-                    "Render complete", f"Video:\n{result.video}\n\nGIF:\n{result.gif}"
+                    "Render complete",
+                    f"Video:\n{result.video}\n\nGIF:\n{result.gif}",
                 ),
             )
         except Exception as exc:
@@ -88,30 +104,31 @@ def launch() -> None:
             root.after(0, lambda: render_button.configure(state="normal"))
 
     def start() -> None:
+        image_path = image_value.get().strip()
+        scene_path = scene_value.get().strip()
+        output_path = output_value.get().strip()
+        if not image_path and not scene_path:
+            messagebox.showwarning(
+                "Choose an image",
+                "Select a JPG, PNG, or WebP image. A scene file is optional.",
+            )
+            return
+        if not output_path:
+            messagebox.showwarning("Choose output", "Select an output folder.")
+            return
         render_button.configure(state="disabled")
         progress.configure(value=0)
-        status.set("Preparing depth layers...")
-        threading.Thread(target=worker, daemon=True).start()
-
-    def auto_analyze() -> None:
-        if not image_value.get():
-            messagebox.showwarning("Choose an image", "Select a source image first.")
-            return
-        from .analyzer import create_auto_project
-
-        draft = Path(output_value.get()).parent / "auto_project"
-        try:
-            scene = create_auto_project(image_value.get(), draft)
-            scene_value.set(str(scene))
-            status.set("Free local draft created. Review it, then render.")
-        except Exception as exc:
-            messagebox.showerror("Analysis failed", str(exc))
+        status.set("Estimating continuous depth without cutting subjects...")
+        threading.Thread(
+            target=worker,
+            args=(image_path, scene_path, output_path),
+            daemon=True,
+        ).start()
 
     button_bar = ttk.Frame(frame)
     button_bar.grid(row=5, column=0, columnspan=3, pady=22)
-    ttk.Button(button_bar, text="Auto-analyze image", command=auto_analyze).pack(
-        side="left", padx=6
+    render_button = ttk.Button(
+        button_bar, text="Create MP4 + GIF", command=start
     )
-    render_button = ttk.Button(button_bar, text="Render parallax", command=start)
     render_button.pack(side="left", padx=6)
     root.mainloop()

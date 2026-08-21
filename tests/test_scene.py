@@ -3,7 +3,10 @@ from pathlib import Path
 
 import numpy as np
 
-from parallax3d.renderer import DepthCameraRenderer
+import cv2
+
+from parallax3d.analyzer import create_auto_project
+from parallax3d.renderer import DepthCameraRenderer, render_scene
 from parallax3d.scene import load_scene
 
 
@@ -37,3 +40,31 @@ def test_renderer_creates_real_depth_change(tmp_path: Path) -> None:
     renderer.save_diagnostics(tmp_path)
     assert (tmp_path / "manifest.json").exists()
     assert (tmp_path / "05_foreground_child.png").exists()
+
+
+def test_one_image_render_outputs_only_video_and_gif(tmp_path: Path) -> None:
+    source = np.full((180, 320, 3), 210, dtype=np.uint8)
+    cv2.circle(source, (160, 95), 42, (40, 55, 70), -1)
+    input_path = tmp_path / "input.png"
+    cv2.imwrite(str(input_path), source)
+    scene = load_scene(create_auto_project(input_path, tmp_path / "project"))
+    scene = replace(
+        scene,
+        render=replace(
+            scene.render,
+            width=160,
+            height=90,
+            fps=2,
+            duration=1.0,
+            particles=0,
+            motion_blur=0.0,
+        ),
+    )
+    output = tmp_path / "render"
+    result = render_scene(scene, output)
+    assert result.video.name == "parallax.mp4"
+    assert result.gif.name == "parallax.gif"
+    assert {path.name for path in output.iterdir()} == {
+        "parallax.mp4",
+        "parallax.gif",
+    }

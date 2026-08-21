@@ -13,7 +13,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Render a single image as a unified-camera 2.5D scene.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    render = sub.add_parser("render", help="Render MP4, GIF, preview, and layers")
+    render = sub.add_parser("render", help="Render only MP4 and GIF from a scene")
     render.add_argument("scene", type=Path)
     render.add_argument("--output", type=Path, default=Path("output/demo"))
     inspect = sub.add_parser("inspect", help="Extract and save scene layers only")
@@ -23,6 +23,9 @@ def _parser() -> argparse.ArgumentParser:
     auto.add_argument("image", type=Path)
     auto.add_argument("--project", type=Path, default=Path("output/auto_project"))
     auto.add_argument("--layers", type=int, default=4)
+    image = sub.add_parser("image", help="Analyze and render one image to MP4 + GIF")
+    image.add_argument("source", type=Path)
+    image.add_argument("--output", type=Path, default=Path("output/render"))
     sub.add_parser("app", help="Open the desktop interface")
     return parser
 
@@ -41,6 +44,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Draft scene: {scene_path}")
         print(f"Render with: python -m parallax3d render \"{scene_path}\"")
         return 0
+    if args.command == "image":
+        from .workflow import render_image
+
+        def report(done: int, total: int) -> None:
+            if done == 1 or done == total or done % max(1, total // 10) == 0:
+                print(f"Rendering {done}/{total}")
+
+        result = render_image(args.source, args.output, report)
+        print(f"MP4: {result.video}")
+        print(f"GIF: {result.gif}")
+        return 0
     scene = load_scene(args.scene)
     if args.command == "inspect":
         renderer = DepthCameraRenderer(scene)
@@ -55,7 +69,6 @@ def main(argv: list[str] | None = None) -> int:
     result = render_scene(scene, args.output, report)
     print(f"MP4: {result.video}")
     print(f"GIF: {result.gif}")
-    print(f"Preview: {result.preview}")
     return 0
 
 

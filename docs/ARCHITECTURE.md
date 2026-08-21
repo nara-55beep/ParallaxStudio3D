@@ -2,20 +2,20 @@
 
 ## Pipeline
 
-1. Analyze the image and propose meaningful objects plus a dense depth field.
-2. Refine object masks and reconstruct the pixels hidden behind them.
-3. Store normalized depth, camera focus, render settings, and matte guidance in
-   a JSON scene.
-4. Project every pixel and object plane through one virtual camera.
+1. Estimate a smooth dense depth field and a stable focal point.
+2. Keep the complete image connected; automatic mode does not create binary
+   person cutouts.
+3. Project every pixel through one dolly/truck camera path.
+4. Add separately phased sky drift with a soft horizon transition.
 5. Add depth-aware particles and velocity-driven radial blur.
-6. Export MP4/GIF plus transparent layers and a universal manifest.
+6. Export only MP4 and GIF during normal use.
 
 ## Why this looks different from sticker animation
 
-All motion is derived from a shared camera envelope and focal point. Near pixels
-have a larger projection scale than far pixels. Objects therefore separate in
-depth while staying spatially coherent. The move is exactly reversible because
-the second half uses the same camera path in reverse.
+All camera motion is derived from a shared envelope and focal point. Near pixels
+have a larger projection scale and truck response than far pixels. Sky drift is
+layered on top with a smooth spatial weight, preventing a hard horizon seam.
+The move returns to its first frame for a clean GIF loop.
 
 ## Production AI backends
 

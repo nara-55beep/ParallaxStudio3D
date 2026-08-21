@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .scene import RegionSpec, SceneSpec, build_planes
+from .scene import RegionSpec, SceneSpec, build_planes, read_depth
 
 
 ProgressCallback = Callable[[int, int], None]
@@ -20,8 +20,14 @@ ProgressCallback = Callable[[int, int], None]
 class RenderResult:
     video: Path
     gif: Path
-    preview: Path
-    layers_dir: Path
+
+
+@dataclass(frozen=True)
+class CameraState:
+    progress: float
+    velocity: float
+    truck: float
+    sky: float
 
 
 def camera_envelope(frame_index: int, frame_count: int) -> tuple[float, float]:
@@ -32,8 +38,17 @@ def camera_envelope(frame_index: int, frame_count: int) -> tuple[float, float]:
     return progress, velocity
 
 
+def camera_path(frame_index: int, frame_count: int) -> CameraState:
+    """A looping dolly plus side-to-side truck and independent sky phase."""
+    progress, velocity = camera_envelope(frame_index, frame_count)
+    t = frame_index / max(frame_count - 1, 1)
+    phase = math.sin(2.0 * math.pi * t)
+    sky_phase = math.sin(4.0 * math.pi * t)
+    return CameraState(progress, velocity, phase, sky_phase)
+
+
 def scale_for_depth(depth: float, push: float, progress: float) -> float:
-    return 1.0 + push * progress * (0.18 + 1.15 * float(depth))
+    return 1.0 + push * progress * (0.10 + 0.95 * float(depth))
 
 
 def _focus_px(scene: SceneSpec) -> tuple[float, float]:
@@ -53,11 +68,15 @@ class DepthCameraRenderer:
         self.grid_x = grid_x
         self.grid_y = grid_y
         y_norm = grid_y / max(self.height - 1, 1)
-        self.depth = np.interp(
-            y_norm,
-            [0.00, 0.18, 0.35, 0.55, 0.75, 1.00],
-            [0.02, 0.05, 0.16, 0.33, 0.65, 0.98],
-        ).astype(np.float32)
+        self.y_norm = y_norm
+        if scene.depth_map is not None:
+            self.depth = read_depth(scene.depth_map, (self.width, self.height))
+        else:
+            self.depth = np.interp(
+                y_norm,
+                [0.00, 0.18, 0.35, 0.55, 0.75, 1.00],
+                [0.02, 0.05, 0.16, 0.33, 0.65, 0.98],
+            ).astype(np.float32)
         self.particles = self._make_particles(scene.render.particles)
 
     def _make_particles(self, count: int) -> np.ndarray:
@@ -70,25 +89,57 @@ class DepthCameraRenderer:
         particles[:, 4] = rng.uniform(0.12, 0.55, count)
         return particles
 
-    def _warp_background(self, progress: float) -> np.ndarray:
-        scale = 1.0 + self.scene.camera.push * progress * (0.18 + 1.15 * self.depth)
+    def _warp_background(self, state: CameraState) -> np.ndarray:
+        scale = 1.0 + self.scene.camera.push * state.progress * (
+            0.10 + 0.95 * self.depth
+        )
         focus_x, focus_y = self.focus
         map_x = focus_x + (self.grid_x - focus_x) / scale
         map_y = focus_y + (self.grid_y - focus_y) / scale
+        response = 0.12 + 0.88 * self.depth
+        map_x += self.scene.camera.truck * self.width * state.truck * response
+        map_y += self.scene.camera.rise * self.height * state.progress * response
+
+        # Clouds/sky have their own faster lateral motion. The smooth weight
+        # avoids a hard horizon seam while retaining stronger movement aloft.
+        sky_weight = np.clip((0.62 - self.y_norm) / 0.62, 0.0, 1.0)
+        sky_weight = sky_weight * sky_weight * (3.0 - 2.0 * sky_weight)
+        map_x += (
+            self.scene.camera.sky_drift
+            * self.width
+            * state.sky
+            * sky_weight
+        )
         return cv2.remap(
-            self.background,
+            self.source if self.scene.mode == "dense" else self.background,
             map_x.astype(np.float32),
             map_y.astype(np.float32),
             cv2.INTER_CUBIC,
             borderMode=cv2.BORDER_REFLECT_101,
         )
 
-    def _warp_plane(self, plane: np.ndarray, region: RegionSpec, progress: float) -> np.ndarray:
-        scale = scale_for_depth(region.depth, self.scene.camera.push, progress)
+    def _warp_plane(
+        self, plane: np.ndarray, region: RegionSpec, state: CameraState
+    ) -> np.ndarray:
+        scale = scale_for_depth(
+            region.depth, self.scene.camera.push, state.progress
+        )
         focus_x, focus_y = self.focus
+        shift_x = (
+            self.scene.camera.truck
+            * self.width
+            * state.truck
+            * (0.12 + 0.88 * region.depth)
+        )
+        shift_y = (
+            self.scene.camera.rise
+            * self.height
+            * state.progress
+            * (0.12 + 0.88 * region.depth)
+        )
         matrix = np.array(
-            [[scale, 0.0, (1.0 - scale) * focus_x],
-             [0.0, scale, (1.0 - scale) * focus_y]],
+            [[scale, 0.0, (1.0 - scale) * focus_x - shift_x],
+             [0.0, scale, (1.0 - scale) * focus_y - shift_y]],
             dtype=np.float32,
         )
         return cv2.warpAffine(
@@ -113,6 +164,8 @@ class DepthCameraRenderer:
     def _draw_particles(
         self, frame: np.ndarray, progress: float, velocity: float, frame_index: int
     ) -> np.ndarray:
+        if self.particles.size == 0:
+            return frame
         overlay = frame.copy()
         focus_x, focus_y = self.focus
         time = frame_index / self.scene.render.fps
@@ -169,16 +222,18 @@ class DepthCameraRenderer:
         return np.clip(result, 0, 255).astype(np.uint8)
 
     def render_frame(self, frame_index: int, frame_count: int) -> np.ndarray:
-        progress, velocity = camera_envelope(frame_index, frame_count)
-        frame = self._warp_background(progress)
+        state = camera_path(frame_index, frame_count)
+        frame = self._warp_background(state)
         for region, plane in sorted(self.planes, key=lambda item: item[0].depth):
-            frame = self._over(frame, self._warp_plane(plane, region, progress))
-        frame = self._draw_particles(frame, progress, velocity, frame_index)
-        return self._radial_motion_blur(frame, velocity)
+            frame = self._over(frame, self._warp_plane(plane, region, state))
+        frame = self._draw_particles(
+            frame, state.progress, state.velocity, frame_index
+        )
+        return self._radial_motion_blur(frame, state.velocity)
 
     def save_diagnostics(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(directory / "00_clean_background.png"), self.background)
+        cv2.imwrite(str(directory / "00_background.png"), self.background)
         cv2.imwrite(str(directory / "01_depth_map.png"), (self.depth * 255).astype(np.uint8))
         composite = self.background.copy()
         for index, (region, plane) in enumerate(
@@ -194,7 +249,7 @@ class DepthCameraRenderer:
             "height": self.height,
             "focus": list(self.scene.camera.focus),
             "push": self.scene.camera.push,
-            "background": "00_clean_background.png",
+            "background": "00_background.png",
             "depth_map": "01_depth_map.png",
             "layers": [
                 {
@@ -219,12 +274,10 @@ def render_scene(
 ) -> RenderResult:
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    layers_dir = output / "layers"
     renderer = DepthCameraRenderer(scene)
-    renderer.save_diagnostics(layers_dir)
 
     frame_count = max(2, int(round(scene.render.duration * scene.render.fps)))
-    video_path = output / "child_mother_parallax.mp4"
+    video_path = output / "parallax.mp4"
     writer = cv2.VideoWriter(
         str(video_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
@@ -235,16 +288,11 @@ def render_scene(
         raise RuntimeError("OpenCV could not initialize an MP4 video writer")
 
     gif_frames: list[Image.Image] = []
-    preview_path = output / "child_mother_parallax_preview.jpg"
     gif_step = max(1, scene.render.fps // 12)
     try:
         for index in range(frame_count):
             frame = renderer.render_frame(index, frame_count)
             writer.write(frame)
-            if index in {0, frame_count // 2, frame_count - 1}:
-                cv2.imwrite(str(output / f"frame_{index:03d}.jpg"), frame)
-            if index == frame_count // 2:
-                cv2.imwrite(str(preview_path), frame)
             if index % gif_step == 0:
                 small = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
                 gif_frames.append(Image.fromarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB)))
@@ -253,7 +301,7 @@ def render_scene(
     finally:
         writer.release()
 
-    gif_path = output / "child_mother_parallax.gif"
+    gif_path = output / "parallax.gif"
     gif_frames[0].save(
         gif_path,
         save_all=True,
@@ -262,4 +310,4 @@ def render_scene(
         loop=0,
         optimize=False,
     )
-    return RenderResult(video_path, gif_path, preview_path, layers_dir)
+    return RenderResult(video_path, gif_path)

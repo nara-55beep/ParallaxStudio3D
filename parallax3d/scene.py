@@ -12,7 +12,10 @@ import numpy as np
 @dataclass(frozen=True)
 class CameraSpec:
     focus: tuple[float, float] = (0.56, 0.43)
-    push: float = 0.17
+    push: float = 0.08
+    truck: float = 0.040
+    rise: float = 0.016
+    sky_drift: float = 0.040
 
 
 @dataclass(frozen=True)
@@ -38,7 +41,9 @@ class RenderSpec:
 @dataclass(frozen=True)
 class SceneSpec:
     source: Path
-    clean_background: Path
+    clean_background: Path | None = None
+    depth_map: Path | None = None
+    mode: str = "dense"
     camera: CameraSpec = field(default_factory=CameraSpec)
     render: RenderSpec = field(default_factory=RenderSpec)
     regions: tuple[RegionSpec, ...] = ()
@@ -57,6 +62,9 @@ def load_scene(path: str | Path) -> SceneSpec:
         candidate = Path(value)
         return candidate if candidate.is_absolute() else (root / candidate).resolve()
 
+    def optional_asset(value: str | None) -> Path | None:
+        return asset(value) if value else None
+
     camera_data = data.get("camera", {})
     render_data = data.get("render", {})
     regions = tuple(
@@ -72,10 +80,15 @@ def load_scene(path: str | Path) -> SceneSpec:
     )
     return SceneSpec(
         source=asset(data["source"]),
-        clean_background=asset(data["clean_background"]),
+        clean_background=optional_asset(data.get("clean_background")),
+        depth_map=optional_asset(data.get("depth_map")),
+        mode=str(data.get("mode", "planes" if regions else "dense")),
         camera=CameraSpec(
             focus=tuple(float(v) for v in camera_data.get("focus", [0.56, 0.43])),
-            push=float(camera_data.get("push", 0.17)),
+            push=float(camera_data.get("push", 0.08)),
+            truck=float(camera_data.get("truck", 0.040)),
+            rise=float(camera_data.get("rise", 0.016)),
+            sky_drift=float(camera_data.get("sky_drift", 0.040)),
         ),
         render=RenderSpec(
             width=int(render_data.get("width", 1280)),
@@ -94,6 +107,14 @@ def read_bgr(path: Path, size: tuple[int, int]) -> np.ndarray:
     if image is None:
         raise FileNotFoundError(f"Could not read image: {path}")
     return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+
+
+def read_depth(path: Path, size: tuple[int, int]) -> np.ndarray:
+    depth = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if depth is None:
+        raise FileNotFoundError(f"Could not read depth map: {path}")
+    depth = cv2.resize(depth, size, interpolation=cv2.INTER_CUBIC)
+    return cv2.bilateralFilter(depth, 9, 28, 28).astype(np.float32) / 255.0
 
 
 def _pixel(point: tuple[float, float], width: int, height: int) -> tuple[int, int]:
@@ -145,7 +166,11 @@ def extract_mask(image: np.ndarray, region: RegionSpec) -> np.ndarray:
 def build_planes(scene: SceneSpec) -> tuple[np.ndarray, np.ndarray, list[tuple[RegionSpec, np.ndarray]]]:
     size = (scene.render.width, scene.render.height)
     source = read_bgr(scene.source, size)
-    background = read_bgr(scene.clean_background, size)
+    background = (
+        read_bgr(scene.clean_background, size)
+        if scene.clean_background is not None
+        else source.copy()
+    )
     planes: list[tuple[RegionSpec, np.ndarray]] = []
     for region in scene.regions:
         alpha = extract_mask(source, region)

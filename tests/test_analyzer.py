@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from parallax3d.analyzer import create_auto_project
+from parallax3d.scene import load_scene
 
 
 def test_auto_project_writes_portable_scene(tmp_path: Path) -> None:
@@ -15,6 +16,12 @@ def test_auto_project_writes_portable_scene(tmp_path: Path) -> None:
 
     scene_path = create_auto_project(input_path, tmp_path / "project")
     data = json.loads(scene_path.read_text(encoding="utf-8"))
-    assert data["regions"]
-    assert (scene_path.parent.parent / "assets" / "clean_background.png").exists()
-    assert (scene_path.parent.parent / "assets" / "subject_proposals.png").exists()
+    assert data["mode"] == "dense"
+    assert data["regions"] == []
+    assert (scene_path.parent.parent / "assets" / "depth_map.png").exists()
+    assert not (
+        scene_path.parent.parent / "assets" / "subject_proposals.png"
+    ).exists()
+    scene = load_scene(scene_path)
+    assert scene.depth_map is not None
+    assert scene.depth_map.exists()
