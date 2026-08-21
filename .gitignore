@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+output/*
+!output/.gitkeep
+!output/demo/
+output/demo/*
+!output/demo/child_mother_parallax.mp4
+!output/demo/child_mother_parallax.gif
+!output/demo/child_mother_parallax_preview.jpg
