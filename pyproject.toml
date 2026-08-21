@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "parallax-studio-3d"
-version = "0.2.0"
-description = "Open 2.5D depth-camera renderer and editor interchange tools"
+version = "0.3.0"
+description = "Automatic semantic-layer 2.5D parallax renderer"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = ["numpy>=1.26", "opencv-python>=4.9", "Pillow>=10.0"]
 
 [project.optional-dependencies]
+ai = ["torch>=2.6", "transformers>=5.0,<6", "safetensors>=0.4"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

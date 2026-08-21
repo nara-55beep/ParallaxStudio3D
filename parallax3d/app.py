@@ -13,15 +13,17 @@ from .workflow import render_image
 def launch() -> None:
     root = tk.Tk()
     root.title("ParallaxStudio3D")
-    root.geometry("720x360")
-    root.minsize(660, 330)
+    root.geometry("720x390")
+    root.minsize(660, 360)
 
     image_value = tk.StringVar()
     scene_value = tk.StringVar()
     output_value = tk.StringVar(
         value=str(Path(__file__).resolve().parents[1] / "output" / "render")
     )
-    status = tk.StringVar(value="Choose one image, then create MP4 + GIF.")
+    status = tk.StringVar(
+        value="Choose one image. AI will cut objects into real depth layers."
+    )
 
     frame = ttk.Frame(root, padding=20)
     frame.pack(fill="both", expand=True)
@@ -81,10 +83,18 @@ def launch() -> None:
         root.after(0, lambda: progress.configure(value=done * 100 / total))
         root.after(0, lambda: status.set(f"Rendering frame {done} of {total}"))
 
+    def update_status(message: str) -> None:
+        root.after(0, lambda: status.set(message))
+
     def worker(image_path: str, scene_path: str, output_path: str) -> None:
         try:
             if image_path:
-                result = render_image(image_path, output_path, update_progress)
+                result = render_image(
+                    image_path,
+                    output_path,
+                    update_progress,
+                    update_status,
+                )
             else:
                 result = render_scene(
                     load_scene(scene_path), output_path, update_progress
@@ -98,8 +108,12 @@ def launch() -> None:
                 ),
             )
         except Exception as exc:
+            error_message = str(exc)
             root.after(0, lambda: status.set("Render failed"))
-            root.after(0, lambda: messagebox.showerror("Render failed", str(exc)))
+            root.after(
+                0,
+                lambda: messagebox.showerror("Render failed", error_message),
+            )
         finally:
             root.after(0, lambda: render_button.configure(state="normal"))
 
@@ -118,7 +132,7 @@ def launch() -> None:
             return
         render_button.configure(state="disabled")
         progress.configure(value=0)
-        status.set("Estimating continuous depth without cutting subjects...")
+        status.set("Starting automatic semantic layer detection...")
         threading.Thread(
             target=worker,
             args=(image_path, scene_path, output_path),
@@ -128,7 +142,7 @@ def launch() -> None:
     button_bar = ttk.Frame(frame)
     button_bar.grid(row=5, column=0, columnspan=3, pady=22)
     render_button = ttk.Button(
-        button_bar, text="Create MP4 + GIF", command=start
+        button_bar, text="AI Cut + Create MP4 + GIF", command=start
     )
     render_button.pack(side="left", padx=6)
     root.mainloop()

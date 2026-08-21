@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+from typing import Callable
 
 import cv2
 import numpy as np
+
+from .segmentation import DetectedLayer, detect_layers
+from .inpainting import inpaint_background
+
+
+LayerDetector = Callable[[np.ndarray, int, Callable[[str], None] | None], list[DetectedLayer]]
 
 
 def _spectral_saliency(image: np.ndarray) -> np.ndarray:
@@ -28,12 +35,7 @@ def _spectral_saliency(image: np.ndarray) -> np.ndarray:
 
 
 def estimate_depth(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
-    """Estimate a smooth, cut-free depth surface from composition and saliency.
-
-    This deliberately avoids binary subject mattes. Every hand, strand, and
-    object edge stays connected to the source image while receiving continuous
-    depth-driven motion.
-    """
+    """Estimate a smooth support depth map for the reconstructed background."""
     height, width = image.shape[:2]
     saliency = _spectral_saliency(image).astype(np.float32) / 255.0
     saliency = cv2.GaussianBlur(
@@ -44,7 +46,6 @@ def estimate_depth(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
     )
     if float(saliency.max()) > float(saliency.min()):
         saliency = cv2.normalize(saliency, None, 0.0, 1.0, cv2.NORM_MINMAX)
-
     y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
     perspective = np.interp(
         y,
@@ -52,10 +53,10 @@ def estimate_depth(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
         [0.03, 0.07, 0.22, 0.53, 0.96],
     ).astype(np.float32)
     perspective = np.repeat(perspective, width, axis=1)
-    depth = np.clip(0.70 * perspective + 0.30 * saliency, 0.0, 1.0)
-    depth_u8 = np.round(depth * 255.0).astype(np.uint8)
-    depth_u8 = cv2.bilateralFilter(depth_u8, 15, 32, 32)
-
+    depth = np.clip(0.76 * perspective + 0.24 * saliency, 0.0, 1.0)
+    depth_u8 = cv2.bilateralFilter(
+        np.round(depth * 255.0).astype(np.uint8), 15, 32, 32
+    )
     weights = np.maximum(saliency - np.percentile(saliency, 62), 0.0)
     total = float(weights.sum())
     if total > 1e-6:
@@ -69,46 +70,104 @@ def estimate_depth(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
     return depth_u8, focus
 
 
+def _background_plate(
+    image: np.ndarray,
+    layers: list[DetectedLayer],
+    status_callback: Callable[[str], None] | None = None,
+) -> np.ndarray:
+    erase = np.zeros(image.shape[:2], dtype=np.uint8)
+    for layer in layers:
+        if layer.erase_from_background:
+            erase = np.maximum(erase, layer.mask)
+    if not np.any(erase > 24):
+        return image.copy()
+    radius = max(3, round(min(image.shape[:2]) * 0.007))
+    kernel_size = radius * 2 + 1
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    holes = cv2.dilate((erase > 24).astype(np.uint8) * 255, kernel, iterations=1)
+    return inpaint_background(image, holes, status_callback)
+
+
 def create_auto_project(
-    image_path: str | Path, output_dir: str | Path, maximum_layers: int = 4
+    image_path: str | Path,
+    output_dir: str | Path,
+    maximum_layers: int = 12,
+    status_callback: Callable[[str], None] | None = None,
+    layer_detector: LayerDetector | None = None,
+    background_builder: Callable[
+        [np.ndarray, list[DetectedLayer], Callable[[str], None] | None], np.ndarray
+    ]
+    | None = None,
 ) -> Path:
-    """Create a portable dense-depth scene without hard subject cutouts."""
+    """Create an editable, portable scene with AI-cut transparent planes."""
     source_path = Path(image_path).resolve()
     output = Path(output_dir).resolve()
     assets = output / "assets"
+    masks_dir = assets / "masks"
     scenes = output / "scenes"
-    assets.mkdir(parents=True, exist_ok=True)
+    masks_dir.mkdir(parents=True, exist_ok=True)
     scenes.mkdir(parents=True, exist_ok=True)
     image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {source_path}")
 
+    detector = layer_detector or detect_layers
+    layers = detector(image, maximum_layers, status_callback)
+    if not layers:
+        raise RuntimeError("No independent parallax layers were detected.")
+
     source_copy = assets / f"source{source_path.suffix.lower() or '.png'}"
     shutil.copy2(source_path, source_copy)
     depth, focus = estimate_depth(image)
     depth_path = assets / "depth_map.png"
+    background_path = assets / "background.png"
     cv2.imwrite(str(depth_path), depth)
+    build_background = background_builder or _background_plate
+    cv2.imwrite(
+        str(background_path),
+        build_background(image, layers, status_callback),
+    )
+
+    regions: list[dict[str, object]] = []
+    for layer in layers:
+        mask_path = masks_dir / f"{layer.name}.png"
+        cv2.imwrite(str(mask_path), layer.mask)
+        regions.append(
+            {
+                "name": layer.name,
+                "label": layer.label,
+                "depth": round(layer.depth, 5),
+                "rect": [0.0, 0.0, 1.0, 1.0],
+                "mask": f"../assets/masks/{mask_path.name}",
+                "motion": layer.motion,
+                "motion_strength": round(layer.motion_strength, 4),
+                "score": round(layer.score, 5),
+            }
+        )
 
     data = {
-        "mode": "dense",
+        "mode": "planes",
         "source": f"../assets/{source_copy.name}",
+        "clean_background": "../assets/background.png",
         "depth_map": "../assets/depth_map.png",
         "camera": {
             "focus": [round(focus[0], 5), round(focus[1], 5)],
-            "push": 0.08,
-            "truck": 0.040,
-            "rise": 0.016,
-            "sky_drift": 0.040
+            "push": 0.065,
+            "truck": 0.028,
+            "rise": 0.012,
+            "sky_drift": 0.032,
         },
         "render": {
             "width": 1280,
             "height": 720,
             "fps": 24,
             "duration": 6.0,
-            "particles": 80,
-            "motion_blur": 0.32,
+            "particles": 55,
+            "motion_blur": 0.24,
         },
-        "regions": [],
+        "regions": regions,
     }
     scene_path = scenes / "auto_scene.json"
     scene_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
