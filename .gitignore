@@ -9,6 +9,5 @@ output/*
 !output/.gitkeep
 !output/demo/
 output/demo/*
-!output/demo/child_mother_parallax.mp4
-!output/demo/child_mother_parallax.gif
-!output/demo/child_mother_parallax_preview.jpg
+!output/demo/parallax.mp4
+!output/demo/parallax.gif

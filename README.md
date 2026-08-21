@@ -1,88 +1,89 @@
 # ParallaxStudio3D
 
-ParallaxStudio3D turns one still image into a cinematic 2.5D depth-camera move.
-It was built to match the camera-through-layers technique in the supplied
-reference: foreground terrain, subjects, midground objects, distant mountains,
-and particles all respond to one shared camera and focal point. It is not a
-collection of cut-out characters drifting sideways.
+ParallaxStudio3D turns one still image into a looping cinematic 2.5D camera
+move. Automatic mode uses a continuous depth surface instead of chopping a
+person into hard cutout pieces, so hands, hair, and limbs remain connected to
+the original image.
 
-## Included demo
+The motion combines:
 
-The supplied child-and-mother scene uses four isolated object planes, a
-completed deep background, a continuous ground depth surface, a forward and
-reverse camera envelope, radial motion blur, and depth-projected particles.
+- depth-dependent dolly movement;
+- a shared side-to-side camera truck and subtle rise;
+- stronger movement for near ground than distant terrain;
+- independent faster sky drift with a soft horizon transition;
+- depth-projected particles and restrained motion blur.
 
-![ParallaxStudio3D demo](output/demo/child_mother_parallax.gif)
+![ParallaxStudio3D demo](output/demo/parallax.gif)
 
-Generated files are in output/demo:
+## Use it on Windows
 
-- child_mother_parallax.mp4 — full 1280x720 render
-- child_mother_parallax.gif — lightweight looping preview
-- child_mother_parallax_preview.jpg — peak camera-push frame
-- layers/ — transparent PNG layers, depth map, rest composite, and manifest
+1. Double-click start_parallax_studio.bat.
+2. Browse for one JPG, PNG, or WebP under Single image.
+3. Leave Scene (optional) empty for a new image.
+4. Choose an output folder.
+5. Click Create MP4 + GIF.
 
-## Start it
+The selected output folder receives exactly:
 
-On Windows, double-click start_parallax_studio.bat.
+- parallax.mp4
+- parallax.gif
 
-Or run:
+Depth maps and temporary analysis files are created in the Windows temporary
+directory and removed automatically after rendering.
+
+The Scene field is only for reopening an advanced hand-authored JSON scene. New
+users do not need to select a scene file.
+
+## Terminal
+
+Render any image directly:
+
+    python -m parallax3d image "C:\path\image.jpg" --output output\render
+
+Render the included demo:
+
+    render_demo.bat
+
+Open the desktop interface:
 
     python -m parallax3d app
 
-Render the included scene from a terminal:
+## Why automatic mode does not cut hands
 
-    python -m parallax3d render scenes\child_mother.json --output output\demo
+The first version proposed binary subject masks with GrabCut. On difficult
+illustrations this could omit a hand or wrist and make the result look like
+moving stickers. The current automatic path never creates a binary person
+cutout. It warps the complete source through a smooth estimated depth field,
+preserving every source pixel while still giving sky, terrain, and salient
+subjects different motion.
 
-Create a free local draft from another image:
-
-    python -m parallax3d auto "C:\path\image.jpg" --project output\my_project
-    python -m parallax3d render output\my_project\scenes\auto_scene.json --output output\my_render
+Advanced curated scenes may still provide explicit transparent object planes
+and a generated clean background when a compositor needs large disocclusions.
 
 ## Editors
 
-- CapCut and practically any video editor: import the generated MP4.
-- After Effects: run adapters/after_effects_import.jsx and choose the generated
-  layers folder.
-- Blender: use adapters/blender_import.py.
-- Other compositors: import the transparent PNG files and read their ordering
-  and depth values from layers/manifest.json.
+- Any editor, including CapCut, can import parallax.mp4.
+- After Effects can use adapters/after_effects_import.jsx with an advanced
+  inspected layer package.
+- Blender can use adapters/blender_import.py with the same manifest.
 
-This universal renderer-and-manifest design is the maintainable way to support
-many programs. Each host adapter stays small while the segmentation, depth,
-camera, particles, and render behavior live in one core.
+## Cost and privacy
 
-## Cost and quality
+The included automatic renderer runs locally with OpenCV. It needs no
+subscription, API key, or upload service. Normal renders leave only MP4 and GIF
+in the chosen folder.
 
-The included OpenCV mode is local and free. No subscription or API key is
-required. Its automatic analyzer is a draft-quality fallback based on visual
-saliency, GrabCut, and local inpainting.
-
-No tool can promise perfect cutouts and hidden-background reconstruction for
-every possible image. Production-quality automation needs strong segmentation,
-monocular depth, and generative inpainting models, plus an editable correction
-step. The included demo uses a high-quality prepared deep-background plate and
-guided object mattes to show the intended quality and motion.
-
-## Scene format
-
-Scenes are JSON files. Important values:
-
-- camera.focus — common normalized vanishing point
-- camera.push — camera travel strength
-- region.depth — 0 is far and 1 is near
-- foreground_points/background_points — matte guidance
-- clip_polygon — optional hard area constraint
-
-The renderer also gives the ground a continuous depth gradient, so foreground
-terrain moves differently from distant terrain instead of behaving like one
-flat background card.
+No single-image method can reveal truly hidden geometry perfectly for every
+photograph. Continuous depth avoids severed body parts and is safer for
+automatic use; advanced segmentation and generative inpainting remain optional
+tools for shots requiring large camera travel.
 
 ## Development
 
 Install and test:
 
-    python -m pip install -e .[dev]
-    python -m pytest
+    python -m pip install -e ".[dev]"
+    python -m pytest -q
 
-The project is MIT licensed. See docs/ARCHITECTURE.md for the adapter model and
-the path from this working MVP to a production AI release.
+The project is MIT licensed. See docs/ARCHITECTURE.md for implementation
+details.
